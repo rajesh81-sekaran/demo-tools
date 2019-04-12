@@ -1,0 +1,171 @@
+def commit = ""
+def tag = ""
+def imageName = ""
+
+pipeline {
+    environment {
+        BUILDBRANCH = "master"
+        REGISTRY = "registry.rancher.centene.com"
+        PROJECT = "demo-tools-project"
+        REPO = "demo-tools"
+        registryCredential = "raj-temp-key"
+    }
+
+    agent { 
+        label 'docker' 
+    }
+    post{
+        failure{
+            script{
+                sh "Post failure"
+            }
+        }
+    }
+
+    parameters{
+        string defaultValue: "", description: '', name: 'PULL_REQUEST_FROM_HASH', trim: true
+        string defaultValue: "", description: '', name: 'PULL_REQUEST_TO_HASH', trim: true
+        string defaultValue: "", description: '', name: 'PULL_REQUEST_FROM_BRANCH', trim: true
+        string defaultValue: "", description: '', name: 'PULL_REQUEST_TO_BRANCH', trim: true
+        string defaultValue: "", description: '', name: 'PULL_REQUEST_AUTHOR_EMAIL', trim: true
+        string defaultValue: "", description: '', name: 'PULL_REQUEST_URL', trim: true
+        string defaultValue: "", description: '', name: 'PULL_REQUEST_ID', trim: true
+        string defaultValue: "", description: '', name: 'PULL_REQUEST_STATE', trim: true
+        string defaultValue: "", description: '', name: 'PULL_REQUEST_REVIEWERS_APPROVED_COUNT', trim: true
+        string defaultValue: "", description: '', name: 'PULL_REQUEST_FROM_REPO_SLUG', trim: true
+        string defaultValue: "", description: '', name: 'PULL_REQUEST_TO_SSH_CLONE_URL', trim: true
+    }
+
+    stages {
+        stage('Error Checking'){
+            steps{
+                script{
+                    if( !PULL_REQUEST_FROM_HASH ){
+                        error("Pull Request source commit hash not defined!")
+                    }
+                    //set pull request build status to in progress
+                    notifyBitbucket('INPROGRESS') // Notifies the Stash Instance of an INPROGRESS build
+                    
+                    if( !PULL_REQUEST_TO_HASH ){
+                        error("Pull Request target commit hash not defined!")
+                    }
+                    if( !PULL_REQUEST_FROM_BRANCH ){
+                        error("Pull Request source branch not defined!")
+                    }
+                    if( !PULL_REQUEST_TO_BRANCH ){
+                        error("Pull Request target branch not defined!")
+                    }
+                    if( !PULL_REQUEST_FROM_REPO_SLUG ){
+                        error("Pull Request Repo Slug not defined!")
+                    }
+                    if( !PULL_REQUEST_TO_SSH_CLONE_URL ){
+                        error("Pull Request SSH Clone URL not defined!")
+                    }
+                    //if( PULL_REQUEST_STATE == 'MERGED' ){
+                    //    error("Pull Request has already been merged!")
+                    //}
+                    if( PULL_REQUEST_REVIEWERS_APPROVED_COUNT.toInteger() < 1 ){
+                        //TODO: Uncomment the error below
+                        //error("Pull Request has not been approved. At least one approval is required prior to performing build.")
+                    }
+                }
+            }
+        }
+
+        stage('Initialize'){
+            steps{
+                script{
+                    sh( '#!/bin/sh -e\n' +
+                        '''
+                            echo "----------------------------------------------------------------"
+                            echo "These are commands that are to be run for informational purposes"
+                            echo "These commands pertain to the specific type of build"
+                            echo "----------------------------------------------------------------"
+                            echo "Job Parameters set"
+                            echo "TO Hash ${PULL_REQUEST_TO_HASH}"
+                            echo "FROM Hash ${PULL_REQUEST_FROM_HASH}"
+                            echo "TO branch ${PULL_REQUEST_TO_BRANCH}"
+                            echo "FROM branch ${PULL_REQUEST_FROM_BRANCH}"
+                            echo "Author ${PULL_REQUEST_AUTHOR_EMAIL}"
+                            echo "Pull Request URL ${PULL_REQUEST_URL}"
+                            echo "Pull Request ID ${PULL_REQUEST_ID}"
+                            echo "Pull Request Status ${PULL_REQUEST_STATE}"
+                            echo "Pull Request Approver count ${PULL_REQUEST_REVIEWERS_APPROVED_COUNT}"
+                            echo "Pull Request repo $PULL_REQUEST_FROM_REPO_SLUG"
+                            echo "Pull Request clone URL $PULL_REQUEST_TO_SSH_CLONE_URL"
+                            echo "----------------------------------------------------------------"
+                            echo "Environment variables"
+                            echo "Bitbucket repo for checkout ${REPO}"
+                            echo "Build Branch ${BUILDBRANCH}"
+                        ''')
+                }
+
+ 				//sh 'curl -sSL -o $GOBIN/dep https://github.com/golang/dep/releases/download/$DEP_RELEASE_TAG/dep-linux-amd64 && chmod 755 $GOBIN/dep'
+				//sh 'go get -v golang.org/x/lint/golint'
+				//sh 'go get -v github.com/tebeka/go2xunit'
+            }
+        }
+
+        stage('Checkout Source Code') {
+            steps {
+                git branch: "${BUILDBRANCH}", credentialsId: 'rajcred', url: 'https://rajesh81sekaran@bitbucket.org/rajesh81sekaran/demo-tools.git'
+                script {
+                    commit = sh(returnStdout: true, script: "git log -n 1 --pretty=format:'%h'").trim()
+                    tag = "DEV-SNAPSHOT-${commit}"
+                    imageName = "${REGISTRY}/${PROJECT}/${REPO}:${tag}"
+                }
+                sh "echo Image:${imageName}"
+            }
+        }
+        stage('Build Docker Image'){
+            steps {
+                sh "docker build -t ${REPO}:build -f bld ."
+                sh "docker create --name extract ${REPO}:build"
+	            sh "docker cp extract:/go/src/${REPO}/cmd/app ./app"
+	            sh "docker rm -f extract"
+	            
+	            writeFile file: 'LATEST_COMMIT', text: "${commit}"
+	            
+	            sh "docker rmi -f ${imageName}"
+	            sh "docker build --no-cache -t ${REPO}:release -f rel ."
+	            sh "rm ./app"
+	            sh "rm ./LATEST_COMMIT"
+	            sh "docker rmi ${REPO}:build"	            
+            }
+        }
+
+        /*stage('Push to image registry') {
+            steps {
+                script {
+                    docker.withRegistry( "http://${REGISTRY}", registryCredential ) {
+                        sh "docker push ${imageName}"
+                    }
+                }
+            }
+        }
+        stage('Notify Success'){
+            steps{
+                script{
+                    notifyBitbucket('SUCCESS')
+                }
+            }   
+        }*/
+    }
+}
+
+def notifyBitbucket(String state) {
+
+    if('SUCCESS' == state || 'FAILED' == state) {
+        currentBuild.result = state         // Set result of currentBuild !Important!
+    }
+    // Send notification to bitbucket to set build status using the stash notifier plugin
+    notifyBitbucket commitSha1: '$PULL_REQUEST_FROM_HASH', 
+        considerUnstableAsSuccess: false, 
+        credentialsId: 'mike-temp-key', 
+        disableInprogressNotification: false, 
+        ignoreUnverifiedSSLPeer: false, 
+        includeBuildNumberInKey: false, 
+        prependParentProjectKey: false, 
+        projectKey: '', 
+        stashServerBaseUrl: 'https://bitbucket.centene.com'
+}

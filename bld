@@ -1,0 +1,9 @@
+FROM golang:alpine
+COPY . /go/src/demo-tools
+WORKDIR /go/src/demo-tools
+RUN apk add --no-cache --virtual .build-deps git; \
+  go get -d -v; \
+  go install -v; \
+  go build -o app;
+CMD ["./cp.sh"]
+#CMD ["/bin/cp -p /go/src/demo-tools/app /go/src/demo-tools/dst/app"]
